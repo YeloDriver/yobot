@@ -172,7 +172,7 @@ class ClanBattle:
         except Exception as e:
             _logger.exception('获取群成员列表错误'+str(type(e))+str(e))
             asyncio.ensure_future(self.api.send_group_msg(
-                group_id=group_id, message='获取群成员错误，这可能是缓存问题，请稍后再试'))
+                group_id=group_id, message='获取群成员错误，这可能是缓存问题，请重启酷Q后再试'))
             return []
         return group_member_list
 
@@ -255,21 +255,32 @@ class ClanBattle:
         # refresh group list
         asyncio.ensure_future(self._update_group_list_async())
 
-    def bind_group(self, group_id: Groupid, qqid: QQid, nickname: str):
+    async def bind_group(self, group_id: Groupid, qqid: QQid, nickname: str):
         """
         set user's default group
 
         Args:
             group_id: group id
             qqid: qqid
+            nickname: displayed name
         """
         user = User.get_or_create(qqid=qqid)[0]
         user.clan_group_id = group_id
         user.nickname = nickname
         user.deleted = False
+        try:
+            groupmember = await self.api.get_group_member_info(
+                group_id=group_id, user_id=qqid)
+            role = 100 if groupmember['role'] == 'member' else 10
+        except Exception as e:
+            _logger.exception(e)
+            role = 100
         membership = Clan_member.get_or_create(
             group_id=group_id,
             qqid=qqid,
+            defaults={
+                'role': role,
+            }
         )[0]
         user.save()
 
@@ -323,10 +334,14 @@ class ClanBattle:
             f'生命值{group.boss_health:,}'
         )
         if group.challenging_member_qq_id is not None:
-            boss_summary += '\n{}正在挑战boss'.format(
+            action = '正在挑战' if group.boss_lock_type == 1 else '锁定了'
+            boss_summary += '\n{}{}boss'.format(
                 self._get_nickname_by_qqid(group.challenging_member_qq_id)
-                or group.challenging_member_qq_id
+                or group.challenging_member_qq_id,
+                action,
             )
+            if group.boss_lock_type != 1:
+                boss_summary += '\n留言：'+group.challenging_comment
         return boss_summary
 
     def challenge(self,
@@ -463,7 +478,9 @@ class ClanBattle:
             0,
             msg,
         )
-        self._boss_status[group_id].set_result(status)
+        self._boss_status[group_id].set_result(
+            (self._boss_data_dict(group), msg)
+        )
         self._boss_status[group_id] = asyncio.get_event_loop().create_future()
 
         if defeat:
@@ -508,7 +525,9 @@ class ClanBattle:
             0,
             f'{nik}的出刀记录已被撤销',
         )
-        self._boss_status[group_id].set_result(status)
+        self._boss_status[group_id].set_result(
+            (self._boss_data_dict(group), status.info)
+        )
         self._boss_status[group_id] = asyncio.get_event_loop().create_future()
         return status
 
@@ -553,7 +572,9 @@ class ClanBattle:
             0,
             'boss状态已修改',
         )
-        self._boss_status[group_id].set_result(status)
+        self._boss_status[group_id].set_result(
+            (self._boss_data_dict(group), status.info)
+        )
         self._boss_status[group_id] = asyncio.get_event_loop().create_future()
         return status
 
@@ -889,7 +910,9 @@ class ClanBattle:
             qqid,
             info,
         )
-        self._boss_status[group_id].set_result(status)
+        self._boss_status[group_id].set_result(
+            (self._boss_data_dict(group), status.info)
+        )
         self._boss_status[group_id] = asyncio.get_event_loop().create_future()
         return status
 
@@ -936,11 +959,13 @@ class ClanBattle:
             0,
             'boss挑战已可申请',
         )
-        self._boss_status[group_id].set_result(status)
+        self._boss_status[group_id].set_result(
+            (self._boss_data_dict(group), status.info)
+        )
         self._boss_status[group_id] = asyncio.get_event_loop().create_future()
         return status
 
-    def save_slot(self, group_id: Groupid, qqid: QQid, todaystatus: Optional[bool] = True):
+    def save_slot(self, group_id: Groupid, qqid: QQid, todaystatus: bool = True, only_check: bool = False):
         """
         record today's save slot
 
@@ -956,6 +981,8 @@ class ClanBattle:
         if membership is None:
             raise UserNotInGroup
         today, _ = pcr_datetime(group.game_server)
+        if only_check:
+            return (membership.last_save_slot == today)
         if todaystatus:
             if membership.last_save_slot == today:
                 raise UserError('您今天已经存在SL记录了')
@@ -980,7 +1007,7 @@ class ClanBattle:
         # refresh
         self.get_member_list(group_id, nocache=True)
 
-        return
+        return todaystatus
 
     @timed_cached_func(max_len=64, max_age_seconds=10, ignore_self=True)
     def get_report(self,
@@ -1176,7 +1203,8 @@ class ClanBattle:
                 else:
                     nickname = (ctx['sender'].get('card')
                                 or ctx['sender'].get('nickname'))
-                self.bind_group(group_id, user_id, nickname)
+                asyncio.ensure_future(
+                    self.bind_group(group_id, user_id, nickname))
                 _logger.info('群聊 成功 {} {} {}'.format(user_id, group_id, cmd))
                 return '{}已加入本公会'.format(atqq(user_id))
         elif match_num == 3:  # 状态
@@ -1332,9 +1360,10 @@ class ClanBattle:
                 return '锁定时请留言'
             else:
                 match = re.match(r'^锁定(?:boss)? *(?:[\:：](.*))?$', cmd)
-                if match:
-                    appli_type = 2
-                    extra_msg = match.group(1)
+                if not match:
+                    return
+                appli_type = 2
+                extra_msg = match.group(1)
                 if isinstance(extra_msg, str):
                     extra_msg = extra_msg.strip()
                     if not extra_msg:
@@ -1388,15 +1417,28 @@ class ClanBattle:
             )
             return f'公会战面板：\n{url}\n建议添加到浏览器收藏夹或桌面快捷方式'
         elif match_num == 16:  # SL
-            if len(cmd) != 2:
+            match = re.match(r'^(?:SL|sl) *([\?？])? *(?:\[CQ:at,qq=(\d+)\])? *([\?？])? *$', cmd)
+            if not match:
                 return
-            try:
-                self.save_slot(group_id, user_id)
-            except ClanBattleError as e:
-                _logger.info('群聊 失败 {} {} {}'.format(user_id, group_id, cmd))
-                return str(e)
-            _logger.info('群聊 成功 {} {} {}'.format(user_id, group_id, cmd))
-            return '已记录SL'
+            behalf = match.group(2) and int(match.group(2))
+            only_check = bool(match.group(1) or match.group(3))
+            if behalf:
+                user_id = behalf
+            if only_check:
+                sl_ed = self.save_slot(group_id, user_id, only_check=True)
+                if sl_ed:
+                    return '今日已使用SL'
+                else:
+                    return '今日未使用SL'
+            else:
+                try:
+                    self.save_slot(group_id, user_id)
+                except ClanBattleError as e:
+                    _logger.info('群聊 失败 {} {} {}'.format(
+                        user_id, group_id, cmd))
+                    return str(e)
+                _logger.info('群聊 成功 {} {} {}'.format(user_id, group_id, cmd))
+                return '已记录SL'
         elif 20 <= match_num <= 25:
             if len(cmd) != 2:
                 return
@@ -1555,13 +1597,13 @@ class ClanBattle:
                     )
                 elif action == 'update_boss':
                     try:
-                        status = await asyncio.wait_for(
+                        bossData, notice = await asyncio.wait_for(
                             asyncio.shield(self._boss_status[group_id]),
                             timeout=30)
                         return jsonify(
                             code=0,
-                            bossData=self._boss_data_dict(group),
-                            notice=status.info,
+                            bossData=bossData,
+                            notice=notice,
                         )
                     except asyncio.TimeoutError:
                         return jsonify(

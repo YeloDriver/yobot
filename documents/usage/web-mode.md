@@ -18,6 +18,10 @@
 
 由于不同的服务器提供商所需的步骤不同，所以具体方法请通过搜索引擎搜索：【你的提供商+你的操作系统+如何开放端口】
 
+由于需要和yobot插件版兼容，默认路由设置为/yobot，直接访问根目录会产生405错误。
+如果您没有修改路径，请通过 `http://您的公网IP:yobot运行的端口/yobot/` 进行访问。
+e.g. `http://10.10.10.10:9222/yobot/`
+
 ::: warning
 
 如果使用这种方法，**必须**为 httpapi 和 yobot 设定 access_token 防止入侵
@@ -36,11 +40,12 @@ Nginx 代理配置后，在机器人配置文件中`public_address`项替换为�
 server {
   listen 80;
   listen [::]:80;
-  listen 443 ssl http2;
-  listen [::]:443 ssl http2;
 
-  ssl_certificate /home/www/ssl/ssl_certificate.crt;  # 你的证书路径
-  ssl_certificate_key /home/www/ssl/ssl_certificate.key;  # 你的私钥路径
+  ## 使用 https 加密通信，增加安全性（可选）
+  # listen 443 ssl http2;
+  # listen [::]:443 ssl http2;
+  # ssl_certificate /home/www/ssl/ssl_certificate.crt;  # 你的证书路径
+  # ssl_certificate_key /home/www/ssl/ssl_certificate.key;  # 你的私钥路径
 
   server_name io.yobot.xyz;  # 你的域名
 
@@ -50,11 +55,6 @@ server {
     proxy_set_header X-Real-IP $remote_addr;  # 传递用户IP
   }
 
-  ## 强制使用https加密通信（可选，安全）
-  #if ($server_port != 443){
-  #  return 301 https://$host$request_uri;
-  #}
-
   ## 静态文件直接访问（可选，性能）
   #location /yobot/assets/ {
   #  alias /home/yobot/src/client/public/static/;  # 你的静态文件目录，如果你修改了`public_basepath`，请同时修改这里的`location`
@@ -63,7 +63,8 @@ server {
 
   ## 输出文件直接访问（可选，性能）
   #location /yobot/output/ {
-  #  alias /home/yobot/src/client/output/;  # 你的输出文件目录，如果你修改了`public_basepath`，请同时修改这里的`location`
+  #  alias /home/yobot/src/client/yobot_data/output/;  # 你的输出文件目录，如果你修改了`public_basepath`，请同时修改这里的`location`
+  #  charset utf-8;  # 设置 HTTP 响应的字符集避免页面出现乱码
   #  expires 30d;
   #}
 
